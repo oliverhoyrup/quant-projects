@@ -1,33 +1,84 @@
 # Projects 🤖
 
 ### 1. Electricity Price Spread Forecasting and Trading Strategies ⚡
-This is the code of a 10 ECTS Topics project I've done as part of my masters in Economics. I forecast the electricity price spreads across borders using a persistence and seasonal baseline, Elastic Net, LSTM, XGBoost and LightGBM point and LightGBM (point + quantile q10/q50/q90). I then evaluate their performance against each other and then run a trading strategy using these models to compare their profitability under realistic transaction costs etc. and stress-tests.
+This is the code of a 10 ECTS Topics project I've done as part of my masters in Economics. I forecast day-ahead electricity price spreads across three borders using persistence and seasonal-naive baselines, Elastic Net, ARIMA, LightGBM (point + quantile q10/q50/q90) and an LSTM. I then evaluate their performance against each other and run a trading strategy on each model to compare their profitability under execution costs and stress tests.
 
 <details>
-<summary><b>View Technical Details & Infrastructure Architecture</b></summary>
+<summary><b>View Details and Results </b></summary>
 
 #### Objective
-Forecasts day-ahead electricity price spreads across three Nordic/Continental European bidding-zone pairs (DK1↔DE_LU, DK1↔DK2, DK1↔SE3) and backtests a systematic trading strategy on the resulting edge, built with the statistical and execution-cost rigor of a real trading desk rather than a stylized backtest.
-
-#### Data Pipeline & Feature Engineering
-* **Multi-Source Ingestion:** Pulls hourly day-ahead prices, load, wind/solar generation, and net transfer capacity (NTC) from the ENTSO-E Transparency Platform across four bidding zones, plus TTF gas and EU carbon (KRBN) proxies via `yfinance`.
-* **Feature Engineering:** Builds lagged spreads (t-24/48/168h), wind-forecast differentials, per-zone residual demand, calendar/holiday dummies, and hand-engineered wind×NTC / demand×NTC interaction terms — validated via SHAP as genuinely predictive rather than spurious.
-
-#### Modeling & Statistical Rigor
-* **Model Comparison:** Walk-forward (expanding-window, 168h embargoed to prevent leakage) evaluation spanning naive persistence, seasonal-naive, Elastic Net, LightGBM (point + quantile q10/q50/q90), XGBoost and LSTM — the sequence models using a 168h windowed-lookback layer.
-* **Significance Testing:** HAC/Newey-West Diebold-Mariano tests and HAC-adjusted Sharpe ratios (7d/60d/90d) to check whether headline performance survives serial-dependence correction, not just a single point estimate.
-
-#### Execution-Realistic Backtest
-* **Risk-Adjusted Sizing:** Kelly and half-Kelly position sizing from realized (not model-quantile) volatility, avoiding circularity between the model's own confidence and its risk budget.
-* **Full Cost Waterfall:** Sequential cost accounting from gross PnL → BRP imbalance haircut → exchange fees → slippage → VaR-style margin financing cost, plus an NTC-capacity feasibility cap (position capped at 10% of published day-ahead NTC) so backtested trades stay executable in principle.
+Forecasts the cross-border spread $S_t = P_{DK1,t} - P_{B,t}$ between DK1 and three neighbouring bidding zones (DE_LU, DK2, SE3), converts the forecasts into trading signals, and backtests them under progressively harsher execution-cost and position-size assumptions. The question is whether a backtested edge survives realistic costs and the fact that daily P&L is serially correlated.
 
 ---
 #### 📊 Key Findings
-| Border | HAC-Adjusted Sharpe | Note |
-| :--- | :--- | :--- |
-| **DK1–SE3** | ~13 (7d) → ~7-8 (60-90d) | Strongest raw edge, but the 7d figure overstates it — corrects down once serial dependence is priced in |
-| **DK1–DE_LU** | ~7.7 | Most robust edge under execution stress-testing |
-| **DK1–DK2** | ~2-3 | Weakest border; edge disappears under conservative/severe stress scenarios |
+| Border | Robust edge under stress? | HAC-90d Sharpe (LightGBM Point) | Note |
+| :--- | :--- | :--- | :--- |
+| **DK1–DE_LU** | **Yes** | 8.46 | Profitable under all three stress scenarios (moderate / conservative / severe); net P&L falls 66% from moderate to severe but stays positive |
+| **DK1–DK2** | **No** | 1.71 | Negative under conservative stress, and no strategy is profitable under severe stress. Reported as a negative result |
+| **DK1–SE3** | **Real, but overstated at short lags** | 7.00 | The 7-day HAC Sharpe is 13.03, but the effective number of independent trading days falls to about 74 of 815 at the 90-day lag, so the 90-day figure is the headline |
+
+* **Most of the Sharpe is the spread, not the model.** The zero-parameter persistence strategy already has a HAC-90d Sharpe of 7.47 at DK1–DE_LU and 5.69 at DK1–SE3. The models mainly add traded volume.
+* **Lower forecast error does not mean higher profit.** ARIMA beats persistence on RMSE at every border but has a lower Sharpe than persistence at all three.
+* **The borders differ because congestion differs.** The spread is zero in about 60% of hours at DK1–DE_LU and DK1–DK2 but in only 15% at DK1–SE3.
+
+---
+#### Data
+* **ENTSO-E Transparency Platform:** hourly day-ahead prices, load forecasts, wind/solar forecasts and day-ahead net transfer capacity (NTC) for DK1, DK2, DE_LU and SE3.
+* **Yahoo Finance:** TTF gas futures and an EU ETS carbon proxy (KRBN).
+* **Period:** 2022-01-01 to 2025-09-30, ending before the October 2025 move to 15-minute market time units. The out-of-sample test period is July 2023 to September 2025 (19,180 hours).
+
+#### Feature Engineering
+Lagged spreads (t-24/48/168h), wind-forecast differentials, residual demand per zone, calendar and holiday dummies, and wind×NTC / demand×NTC interaction terms.
+
+#### Models
+| Model | Role |
+| :--- | :--- |
+| Persistence (t-24) / Seasonal Naive (t-168) | Naive baselines |
+| Elastic Net | Linear benchmark |
+| ARIMA (seasonal ARMA on the spread) | Classical time-series benchmark |
+| LightGBM (point forecast) | Main non-linear model |
+| LightGBM (quantile q10/q50/q90) | Probabilistic forecast; drives the confidence-weighted strategy and the calibration check |
+| LSTM | Sequence model with a 168-hour lookback window |
+
+#### Validation & Statistical Tests
+* **Walk-forward validation:** five expanding-window folds with a 168-hour embargo, applied to every model's inner validation split as well as the outer folds.
+* **Diebold–Mariano tests:** every model against persistence, with HAC/Newey–West standard errors.
+* **Quantile calibration:** empirical coverage of the [q10, q90] interval is measured directly. The worst-calibrated border (DK1–DK2) is also the one where the confidence-weighted strategy loses money.
+* **Serial dependence:** HAC Sharpe ratios at six lags (1–90 days) and the Newey–West-implied effective number of independent trading days (Lo, 2002).
+
+#### Backtest
+* **Position sizing:** volatility targeting on realized spread volatility, with a ceiling of 100 MWh per hour at every border. The ceilings are stylized and no NTC-based cap is applied.
+* **Cost waterfall:** gross P&L → BRP imbalance haircut → exchange fees (Nord Pool's published fee) → volatility-scaled slippage. The haircut is a cost on the absolute spread captured, $q_t S_t - h\,|q_t S_t|$, so it never reduces a loss.
+* **Stress tests:** three scenarios with a higher haircut, higher fees and slippage, and lower position ceilings (75 / 50 / 25 MWh).
+* **Risk measures:** HAC Sharpe, CVaR95, Profit/CVaR, maximum drawdown and net P&L per MWh traded.
+
+#### Robustness Check on Data Timing
+A query against the ENTSO-E API showed that its `createdDateTime` field cannot verify when a forecast was published. Elastic Net and LightGBM Point were therefore re-estimated with every forecast-derived feature shifted a further 24 hours back, and the results did not change materially.
+
+#### Notebook Structure
+```
+├── Data Pipeline             # ENTSO-E + Yahoo Finance ingestion and cleaning
+├── Feature Engineering       # Fundamentals, NTC interactions, calendar, lags
+├── Predictive Modeling       # Walk-forward validation of all models, calibration
+├── ARIMA Benchmark           # Seasonal ARMA on the same folds
+├── Trading Backtest          # Signals, position sizing, cost waterfall
+├── Stress Tests              # Moderate / conservative / severe scenarios
+├── Serial-Dependence Checks  # Multi-lag HAC Sharpe, effective independent days
+├── SHAP                      # Descriptive feature importance per border
+└── Lag-Robustness Check      # Forecast features shifted a further 24 hours
+```
+
+#### Setup
+```bash
+pip install entsoe-py pandas numpy scikit-learn lightgbm torch yfinance matplotlib seaborn holidays shap tqdm statsmodels python-dotenv beautifulsoup4 lxml pyarrow
+```
+Requires a free ENTSO-E API token (register at [transparency.entsoe.eu](https://transparency.entsoe.eu)):
+```bash
+export ENTSOE_API_KEY="your-token"
+```
+
+#### Limitations
+The backtest is a stylized execution framework and not a claim that the position sizes were executable in the real auction. No day-ahead NTC series is published for DK1–SE3. The sample includes the 2022 gas crisis, and its influence on the fitted models has not been tested separately.
 
 </details>
 
@@ -116,7 +167,7 @@ Identifies structural capital inefficiencies across 130+ perpetual asset markets
 | **Crypto Volatility Forecasting** | TensorFlow, XGBoost, Scikit-Learn, NumPy, YFinance | Non-Linear Time-Series ML, Multi-Lag Feature Engineering |
 | **VIX Systematic Signals** | Pandas, YFinance, Requests, State Serialization (JSON) | Persistent State Management, Rolling Matrix Math, Automation |
 | **Funding Rate Arbitrage Bot** | REST APIs, Vectorized Math, Multi-Endpoint Rotators | Delta-Neutral Yield Optimization, Network Redundancy |
-| **Electricity Price Spread Forecasting** | ENTSO-E API, LightGBM, PyTorch (LSTM), Scikit-Learn, SHAP, YFinance | Walk-Forward Time-Series CV, Cross-Border Spread Modeling, Execution-Cost-Aware Backtesting |
+| **Electricity Price Spread Forecasting** | ENTSO-E API, LightGBM, PyTorch (LSTM), Scikit-Learn, Statsmodels (ARIMA), SHAP, YFinance | Walk-Forward Time-Series CV, Cross-Border Spread Modeling, Execution-Cost-Aware Backtesting |
 ---
 
 ## 🚀 Installation & Setup
